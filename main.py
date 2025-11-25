@@ -579,6 +579,16 @@ def process_senate_ptr(LIST_URL, report_link, official_id):
         asset_type = cols[5].text
         ttype = cols[6].text
         amount = cols[7].text
+        if '-' in amount:
+            low = amount[:amount.index('-')].strip()
+            high = amount[amount.index('-')+1:].strip()
+            low = low.replace('$', '')
+            high = high.replace('$', '')
+            high = high.replace(',', '')
+            low = low.replace(',', '')
+            amount = round((int(high) + int(low)) / 2, 2)
+        amount = float(str(amount).replace('$', ''))
+
         ok = insert_gov_trade(official_id, transaction_date, f"{asset_name} ({ticker})", ttype, amount, "N/A", report_link[:report_link.index('/')])
         processed += 1
         inserted += ok
@@ -783,48 +793,62 @@ def dashboard_tracked():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
+    # --- SEC tracked insiders ---
     c.execute("""
         SELECT filings.insider, filings.issuer, trades.transaction_date,
                trades.security_title, trades.transaction_type,
-               trades.amount, trades.price, filings.url
+               trades.amount, trades.price, filings.url, 'SEC' AS source
         FROM trades
         JOIN filings ON trades.filing_id = filings.id
         JOIN tracked_insiders ON filings.insider = tracked_insiders.insider
-        ORDER BY trades.transaction_date DESC
     """)
 
-    rows = c.fetchall()
+    sec_rows = c.fetchall()
+
+    # --- GOV tracked officials ---
+    c.execute("""
+        SELECT go.name, go.role, gt.transaction_date,
+               gt.security_title, gt.transaction_type,
+               gt.amount, gt.price, gt.source_url, 'GOV' AS source
+        FROM gov_trades gt
+        JOIN gov_officials go ON gt.official_id = go.id
+        JOIN tracked_insiders ti ON go.name = ti.insider
+    """)
+
+    gov_rows = c.fetchall()
+
     conn.close()
 
+    # merge and sort by date desc
+    rows = sec_rows + gov_rows
+    rows.sort(key=lambda r: r[2], reverse=True)  # sort by transaction_date
+
     html = """
-    <h1>Tracked Insider Trades</h1>
-    <p>This view only shows insiders you are tracking.</p>
+    <h1>Tracked Trades (SEC + Government)</h1>
+    <p>This view shows <b>ALL</b> tracked insiders + government officials.</p>
 
     <a href="/sec_dashboard"
        style="padding:10px 20px; background:#0074D9; color:white; text-decoration:none;">
-       ← Back to Full Dashboard
+       ← Back to Main Dashboard
     </a>
 
     <br><br>
 
     <style>
-        tr:hover {
-            background: #e0e0e0;
-        }
-        th {
-            background: #f0f0f0;
-        }
+        tr:hover { background: #e0e0e0; }
+        th { background: #f0f0f0; }
     </style>
 
     <table border='1' cellpadding='5' width='100%'>
         <tr>
-            <th>Insider</th>
-            <th>Issuer</th>
+            <th>Name</th>
+            <th>Issuer/Role</th>
             <th>Date</th>
             <th>Security</th>
             <th>Type</th>
             <th>Amount</th>
             <th>Price</th>
+            <th>Source</th>
         </tr>
 
         {% for r in rows %}
@@ -836,13 +860,13 @@ def dashboard_tracked():
             <td>{{ r[4] }}</td>
             <td>{{ r[5] }}</td>
             <td>{{ r[6] }}</td>
+            <td>{{ r[8] }}</td>
         </tr>
         {% endfor %}
     </table>
     """
 
     return render_template_string(html, rows=rows)
-
 
 # ---------------------- Run App ----------------------
 if __name__ == "__main__":
