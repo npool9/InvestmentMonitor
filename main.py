@@ -480,7 +480,7 @@ def scrape_house_ptrs(limit=10):
     return results
 
 # --- Example: scrape Senate PTRs (placeholder; structure varies) ---
-def scrape_senate_ptrs(pages=10, limit=None):
+def scrape_senate_ptrs(pages=15, limit=None):
     # Placeholder similar to scrape_house_ptrs; adjust selectors when targeting actual senate site
     # For now we return empty list (or you can replicate above approach for a known senate listing URL)
     LIST_URL = "https://efdsearch.senate.gov"
@@ -610,7 +610,7 @@ def process_senate_ptr(LIST_URL, report_link, official_id, driver):
             amount = round((int(high) + int(low)) / 2, 2)
         amount = float(str(amount).replace('$', ''))
 
-        ok = insert_gov_trade(official_id, transaction_date, f"{asset_name} ({ticker})", ttype, amount, "N/A", report_link[:report_link.index('/')])
+        ok = insert_gov_trade(official_id, transaction_date, f"{asset_name} ({ticker})", ttype, amount, "N/A", f"{LIST_URL}/{report_link}")
         processed += 1
         inserted += ok
     return processed, inserted
@@ -892,3 +892,5 @@ def dashboard_tracked():
 # ---------------------- Run App ----------------------
 if __name__ == "__main__":
     app.run(port=5050, debug=True)
+    # delete_gov_officials()
+    # delete_gov_trades()
