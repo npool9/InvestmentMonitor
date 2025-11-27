@@ -1,5 +1,7 @@
 # gov_and_form4_app.py
 import sqlite3
+from idlelib.pyparse import trans
+
 from flask import Flask, jsonify, render_template_string
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -14,6 +16,7 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import re
 import html
+import datetime
 
 app = Flask(__name__)
 DB_PATH = "govtrades.db"
@@ -55,7 +58,7 @@ def init_db():
         accession TEXT UNIQUE,
         insider TEXT,
         issuer TEXT,
-        filing_date TEXT,
+        filing_date DATE,
         url TEXT
     )
     """)
@@ -64,7 +67,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filing_id INTEGER,
-        transaction_date TEXT,
+        transaction_date DATE,
         security_title TEXT,
         transaction_type TEXT,
         amount INTEGER,
@@ -81,7 +84,7 @@ def init_db():
         name TEXT,
         role TEXT,
         source_url TEXT,
-        UNIQUE(name, role, source_url)
+        UNIQUE(name, role)
     )
     """)
 
@@ -89,14 +92,14 @@ def init_db():
     CREATE TABLE IF NOT EXISTS gov_trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         official_id INTEGER,
-        transaction_date TEXT,
+        transaction_date DATE,
         security_title TEXT,
         transaction_type TEXT,
         amount INTEGER,
         price REAL,
         source_url TEXT,
         FOREIGN KEY(official_id) REFERENCES gov_officials(id),
-        UNIQUE(official_id, transaction_date, security_title, transaction_type, amount, price, source_url)
+        UNIQUE(official_id, transaction_date, security_title, transaction_type, amount)
     )
     """)
 
@@ -151,7 +154,6 @@ def normalize_number(s, integer=False):
 
 # ---------------------- Existing SEC/Form4 Pull (unchanged conceptually) ----------------------
 # For brevity I include a compact pull_once that uses the same logic you've been using.
-start = 0
 increment = 100
 FORM4_FEED_URL_TEMPLATE = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&start={start}&count={count}"
 doc_type = {"html": 0, "xml": 1}
@@ -163,45 +165,44 @@ def pull_once():
     Existing SEC Form 4 pull. Keeps behavior mostly the same as your working app.
     Only scans a single page for speed. Expand as needed.
     """
-    global start
-    driver = get_headless_driver()
-    feed_url = FORM4_FEED_URL_TEMPLATE.format(start=start, count=increment)
-    driver.get(feed_url)
-
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "/html/body/div/table[2]"))
-        )
-    except:
-        driver.quit()
-        return jsonify({"error": "Form 4 table not fully loaded"})
-
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    driver.quit()
-
-    tables = soup.find_all("table")
-    if len(tables) <= 6:
-        return jsonify({"error": "Form 4 table could not be parsed"})
-    table = tables[6]
-
-    rows = table.find_all("tr")[1:]  # skip header
+    global increment
+    pages = 15
     processed = 0
     inserted = 0
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 5:
-            continue
-        # second column, pick xml/html link depending on file_type
+    for i in range(pages):
+        print(f"Page {i+1}/{pages}")
+        driver = get_headless_driver()
+        feed_url = FORM4_FEED_URL_TEMPLATE.format(start=i*increment, count=increment)
+        driver.get(feed_url)
         try:
-            link = cols[1].find_all("a")[doc_type[file_type]]
-        except Exception:
-            continue
-        index_url = urljoin("https://www.sec.gov", link.get("href"))
-        accession = link.get("href").strip()
-        if process_filing(index_url, accession):
-            inserted += 1
-        processed += 1
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "/html/body/div/table[2]"))
+            )
+        except:
+            driver.quit()
+            return jsonify({"error": "Form 4 table not fully loaded"})
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        driver.quit()
 
+        tables = soup.find_all("table")
+        if len(tables) <= 6:
+            return jsonify({"error": "Form 4 table could not be parsed"})
+        table = tables[6]
+        rows = table.find_all("tr")[1:]  # skip header
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+            # second column, pick xml/html link depending on file_type
+            try:
+                link = cols[1].find_all("a")[doc_type[file_type]]
+            except Exception:
+                continue
+            index_url = urljoin("https://www.sec.gov", link.get("href"))
+            accession = link.get("href").strip()
+            if process_filing(index_url, accession):
+                inserted += 1
+            processed += 1
     return jsonify({"processed": processed, "inserted": inserted})
 
 # ---------------------- Filing Processing ----------------------
@@ -223,18 +224,15 @@ def parse_form4(accession, index_url, url, parser_type):
     driver = get_headless_driver()
     driver.get(url)
     time.sleep(1)
-
     content = None
     if parser_type == "xml":
         content = driver.page_source
-
     def xml_extract(parent, path, cast=str):
         try:
             node = parent.find(path)
             return cast(node.text.strip()) if node is not None and node.text else None
         except:
             return None
-
     root = None
     if parser_type == "xml" and content:
         content = html.unescape(content)
@@ -246,49 +244,38 @@ def parse_form4(accession, index_url, url, parser_type):
         if not match:
             print("Not a Form 4")
             return
-
         xml_block = match.group(1)
         root = ET.fromstring(xml_block)
-
         insider = xml_extract(root, ".//reportingOwner/reportingOwnerId/rptOwnerName")
         issuer = xml_extract(root, ".//issuer/issuerName")
         filing_date = xml_extract(root, ".//periodOfReport")
-
+        filing_date = datetime.datetime.strptime(filing_date.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
         accession = re.search(r"SEC FILE NUMBER:\s*([0-9\-]+)", content).group(1)
-
     else:
         insider = driver.find_element(By.XPATH, "/html/body/table[2]/tbody/tr[1]/td[1]/table[1]/tbody/tr/td/a").text
         issuer = driver.find_element(By.XPATH, "/html/body/table[2]/tbody/tr[1]/td[2]/a").text
         filing_date = driver.find_element(By.XPATH, "/html/body/table[2]/tbody/tr[2]/td/span[2]").text
-
+        filing_date = datetime.datetime.strptime(filing_date.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
     filing_id = insert_filing(accession, insider, issuer, filing_date, index_url)
-
     count = 0
-
     if parser_type == "xml":
         transactions = root.findall(".//nonDerivativeTable/nonDerivativeTransaction")
-
         for trans in transactions:
             date = xml_extract(trans, "./transactionDate/value")
+            date = datetime.datetime.strptime(date.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
             title = xml_extract(trans, "./securityTitle/value")
             code = xml_extract(trans, "./transactionCoding/transactionCode")
-
             if code not in TRANSACTION_CODES:
                 continue
-
             ttype = TRANSACTION_CODES[code]
             amount = xml_extract(trans, "./transactionAmounts/transactionShares/value", int)
             price = xml_extract(trans, "./transactionAmounts/transactionPricePerShare/value", float)
-
             if price == '0' or amount == '0':
                 continue
-
             if not date or not title or not ttype:
                 continue
-
             insert_trade(filing_id, date, title, ttype, amount, price)
             count += 1
-
     print(f"[INFO] Inserted {count} trades for {accession}")
     return count > 0
 
@@ -336,7 +323,7 @@ def find_primary_document(index_url, file_type):
     driver = get_headless_driver()
     driver.get(index_url)
     try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, "//table[@class='tableFile']")))
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, "//table[@class='tableFile']")))
     except:
         driver.quit()
         return None
@@ -427,12 +414,11 @@ def scrape_house_ptrs(limit=10):
             break
 
     results = []
+    driver = get_headless_driver()
     for link in links:
-        driver = get_headless_driver()
         driver.get(link)
         time.sleep(0.8)
         doc_soup = BeautifulSoup(driver.page_source, "html.parser")
-        driver.quit()
 
         # Try to find official name
         name_tag = doc_soup.find(lambda tag: tag.name in ("h1", "h2", "h3") and "Statement" in tag.text or "Financial" in tag.text)
@@ -494,58 +480,93 @@ def scrape_house_ptrs(limit=10):
     return results
 
 # --- Example: scrape Senate PTRs (placeholder; structure varies) ---
-def scrape_senate_ptrs(limit=10):
+def scrape_senate_ptrs(pages=10, limit=None):
     # Placeholder similar to scrape_house_ptrs; adjust selectors when targeting actual senate site
     # For now we return empty list (or you can replicate above approach for a known senate listing URL)
     LIST_URL = "https://efdsearch.senate.gov"
     driver = get_headless_driver()
-    driver.get(LIST_URL)
-    time.sleep(1)
-    if driver.current_url == f"{LIST_URL}/search/home/":  # agree
-        checkbox = driver.find_element(By.XPATH, "//input[@id=\"agree_statement\"]")
-        checkbox.click()
-        time.sleep(1)
-    # Click periodic reports checkbox
-    checkbox = driver.find_element(By.XPATH, "//input[@id=\"reportTypes\" and @value=\"11\"]")
-    checkbox.click()
-    # Click search button
-    search_button = driver.find_element(By.XPATH, "//*[@id=\"searchForm\"]/div/button")
-    search_button.click()
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//table[@id=\"filedReports\"]"))
-        )
-    except:
-        driver.quit()
-        return jsonify({"error": "Senate PTR table not fully loaded"})
-    # Sort by date descending
-    date_sort = driver.find_element(By.XPATH, "//table[@id=\"filedReports\"]/thead/tr/th[5]")
-    date_sort.click()
-    time.sleep(0.5)
-    date_sort.click()
-    time.sleep(2)
-    # Iterate through rows
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    # driver.quit()
-    table = soup.find("tbody")
     processed, inserted = 0, 0
-    for row in table.find_all("tr")[:limit]:
-        cols = row.find_all("td")
-        first_name = cols[0].text
-        last_name = cols[1].text
-        office = cols[2].text
-        if '(' in office:
-            office = office[office.index('(')+1:office.index(')')]
-        report_link = cols[3].find('a').get("href")
-        date_filed = cols[4].text
-        print(first_name, last_name, office, date_filed)
-        print("Report Link;", report_link)
-        official_id = insert_gov_official(f"{first_name} {last_name}", office, LIST_URL)
-        processed, inserted = process_senate_ptr(LIST_URL, report_link, official_id)
+    row_count = 0
+    page_count = 0
+    while page_count < pages:
+        driver.get(LIST_URL)
+        time.sleep(1)
+        if driver.current_url == f"{LIST_URL}/search/home/":  # agree
+            checkbox = driver.find_element(By.XPATH, "//input[@id=\"agree_statement\"]")
+            checkbox.click()
+            time.sleep(1)
+        # Click periodic reports checkbox
+        if EC.presence_of_element_located((By.XPATH, "//input[@id=\"reportTypes\" and @value=\"11\"]")):
+            checkbox = driver.find_element(By.XPATH, "//input[@id=\"reportTypes\" and @value=\"11\"]")
+            checkbox.click()
+            # Click search button
+            search_button = driver.find_element(By.XPATH, "//*[@id=\"searchForm\"]/div/button")
+            search_button.click()
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//table[@id=\"filedReports\"]"))
+            )
+        except:
+            driver.quit()
+            raise Exception("error: Senate PTR table not fully loaded")
+        # Sort by date descending
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 0);")
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//th[contains(@aria-label, 'Date')]"))
+            )
+        except:
+            driver.quit()
+            raise Exception("error: Date sorting did not appear")
+        date_sort = driver.find_element(By.XPATH, "//th[contains(@aria-label, 'Date')]")
+        date_sort.click()
+        time.sleep(0.5)
+        date_sort.click()
+        time.sleep(2)
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//table[@id=\"filedReports\"]"))
+            )
+        except:
+            driver.quit()
+            raise Exception("error: Senate PTR table not fully loaded")
+        for _ in range(page_count):
+            try:
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, "//a[@class=\'paginate_button next\']"))
+                )
+            except:
+                driver.quit()
+                raise Exception("error: Next page button did not load in time")
+            next_page = driver.find_element(By.XPATH, "//a[@class=\'paginate_button next\']")
+            next_page.click()
+            time.sleep(1.5)
+        # Iterate through rows
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        # driver.quit()
+        table = soup.find("tbody")
+        for row in table.find_all("tr"):
+            cols = row.find_all("td")
+            first_name = cols[0].text
+            last_name = cols[1].text
+            office = cols[2].text
+            if '(' in office:
+                office = office[office.index('(')+1:office.index(')')]
+            report_link = cols[3].find('a').get("href")
+            date_filed = cols[4].text
+            official_id = insert_gov_official(f"{first_name} {last_name}", office, LIST_URL)
+            processed, inserted = process_senate_ptr(LIST_URL, report_link, official_id, driver)
+            row_count += 1
+            if limit and row_count == limit:
+                break
+        if limit and row_count == limit:
+            break
+        page_count += 1
+    driver.quit()
     return processed, inserted
 
-def process_senate_ptr(LIST_URL, report_link, official_id):
-    driver = get_headless_driver()
+def process_senate_ptr(LIST_URL, report_link, official_id, driver):
     driver.get(f"{LIST_URL}/{report_link}")
     time.sleep(1)
     if driver.current_url == f"{LIST_URL}/search/home/":  # agree
@@ -558,7 +579,6 @@ def process_senate_ptr(LIST_URL, report_link, official_id):
             EC.presence_of_element_located((By.XPATH, "//tbody"))
         )
     except:
-        driver.quit()
         print("Transactions table did not load. Skipping this filing.")
         return 0, 0
     soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -569,6 +589,7 @@ def process_senate_ptr(LIST_URL, report_link, official_id):
     for row in table.find_all("tr"):
         cols = row.find_all("td")
         transaction_date = cols[1].text
+        transaction_date = datetime.datetime.strptime(transaction_date.strip(), "%m/%d/%Y").strftime("%Y-%m-%d")
         owner = cols[2].text
         ticker = cols[3]
         if ticker.find('a'):
@@ -616,7 +637,7 @@ def pull_gov_once():
     #         if ok:
     #             inserted += 1
     # Senate & others (placeholders)
-    processed, inserted = scrape_senate_ptrs(limit=10)
+    processed, inserted = scrape_senate_ptrs()
     return jsonify({"processed": processed, "inserted": inserted})
 
 # ---------------------- Tracked endpoints (shared) ----------------------
@@ -734,7 +755,7 @@ def gov_dashboard():
     conn.close()
 
     html = """
-    <h1>Government Officials — Tracked Trades</h1>
+    <h1>Periodic Trade Reports — Government Disclosures</h1>
 
     <style>
         tr.tracked { background-color: #fff3cd !important; }
