@@ -166,7 +166,7 @@ def pull_once():
     Only scans a single page for speed. Expand as needed.
     """
     global increment
-    pages = 15
+    pages = 5
     processed = 0
     inserted = 0
     for i in range(pages):
@@ -249,6 +249,7 @@ def parse_form4(accession, index_url, url, parser_type):
         insider = xml_extract(root, ".//reportingOwner/reportingOwnerId/rptOwnerName")
         issuer = xml_extract(root, ".//issuer/issuerName")
         filing_date = xml_extract(root, ".//periodOfReport")
+        filing_date = filing_date[:10]  # only capture date, not time
         filing_date = datetime.datetime.strptime(filing_date.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
         accession = re.search(r"SEC FILE NUMBER:\s*([0-9\-]+)", content).group(1)
     else:
@@ -262,6 +263,7 @@ def parse_form4(accession, index_url, url, parser_type):
         transactions = root.findall(".//nonDerivativeTable/nonDerivativeTransaction")
         for trans in transactions:
             date = xml_extract(trans, "./transactionDate/value")
+            date = date[:10]  #  only capture date, not time
             date = datetime.datetime.strptime(date.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
             title = xml_extract(trans, "./securityTitle/value")
             code = xml_extract(trans, "./transactionCoding/transactionCode")
@@ -480,7 +482,7 @@ def scrape_house_ptrs(limit=10):
     return results
 
 # --- Example: scrape Senate PTRs (placeholder; structure varies) ---
-def scrape_senate_ptrs(pages=15, limit=None):
+def scrape_senate_ptrs(pages=10, limit=None):
     # Placeholder similar to scrape_house_ptrs; adjust selectors when targeting actual senate site
     # For now we return empty list (or you can replicate above approach for a known senate listing URL)
     LIST_URL = "https://efdsearch.senate.gov"
