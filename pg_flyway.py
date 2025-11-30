@@ -18,7 +18,8 @@ class PGFlyway:
         try:
             self.db_password = open(os.path.join(self.secrets_path, "db_password.txt"), 'r').read().strip()
         except FileNotFoundError:
-            raise Exception("Please create a file secrets/db_password.txt")
+            open(os.path.join(self.secrets_path, "db_password.txt"), 'w')
+            raise Exception("Please write password to file \'secrets/db_password.txt\'")
         self.db_port = open(os.path.join(self.secrets_path, "db_port.txt"), 'r').read().strip()
         try:
             # Connect to the default 'postgres' database to create a new one
