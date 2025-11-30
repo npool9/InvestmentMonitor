@@ -583,7 +583,6 @@ def track_insider(insider):
     c = pg_flyway.conn.cursor()
     c.execute("INSERT INTO tracked_insiders (insider) VALUES (%s) ON CONFLICT (insider) DO NOTHING", (insider,))
     pg_flyway.conn.commit()
-    pg_flyway.conn.close()
     return jsonify({"status": "tracked", "insider": insider})
 
 @app.route("/untrack/<insider>", methods=["POST"])
