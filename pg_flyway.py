@@ -12,10 +12,11 @@ class PGFlyway:
         Initialization
         """
         self.flyway_path = os.path.join(os.path.dirname(__file__), "flyway")
-        self.db_host = "localhost"
-        self.db_user = "postgres"  # Replace with your PostgreSQL username
-        self.db_password = ""  # Replace with your PostgreSQL password
-        self.db_port = 5432
+        self.secrets_path = os.path.join(os.path.dirname(__file__), "secrets")
+        self.db_host = open(os.path.join(self.secrets_path, "db_host.txt"), 'r').read().strip()
+        self.db_user = open(os.path.join(self.secrets_path, "db_user.txt"), 'r').read().strip()
+        self.db_password = open(os.path.join(self.secrets_path, "db_password.txt"), 'r').read().strip()
+        self.db_port = open(os.path.join(self.secrets_path, "db_port.txt"), 'r').read().strip()
         try:
             # Connect to the default 'postgres' database to create a new one
             self.conn = psycopg2.connect(

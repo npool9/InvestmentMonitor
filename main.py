@@ -595,6 +595,7 @@ def untrack_insider(insider):
 
 # ---------------------- Dashboards ----------------------
 
+@app.route('/')
 @app.route("/sec_dashboard")
 def dashboard():
     """Original Form 4 dashboard (shows trades from 'trades' table)."""

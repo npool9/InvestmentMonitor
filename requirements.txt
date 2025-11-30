@@ -4,3 +4,4 @@ beautifulsoup4
 lxml
 selenium
 psycopg2-binary
+webdriver-manager
