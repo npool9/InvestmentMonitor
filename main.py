@@ -289,8 +289,9 @@ def find_primary_document(index_url, file_type):
 # ---------------------- Government scraping helpers ----------------------
 def insert_gov_official(name, role, source_url):
     c = pg_flyway.conn.cursor()
+    pg_flyway.conn.commit()
     c.execute("INSERT INTO gov_officials (name, role, source_url) VALUES (%s, %s, %s) ON CONFLICT (name, role) DO NOTHING",
-              (name, role))
+              (name, role, source_url))
     pg_flyway.conn.commit()
     c.execute("SELECT id FROM gov_officials WHERE name=%s AND role=%s AND source_url=%s", (name, role, source_url))
     row = c.fetchone()
@@ -310,7 +311,7 @@ def insert_gov_trade(official_id, date, title, ttype, amount, price, source_url)
             INSERT INTO gov_trades
             (official_id, transaction_date, security_title, transaction_type, amount, price, source_url)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (official_id, transaction_date, security_title, transaction_type, amount, price, source_url) DO NOTHING
+            ON CONFLICT (official_id, transaction_date, security_title, transaction_type, amount) DO NOTHING
         """, (official_id, date, title, ttype, amount_val, price_val, source_url))
         pg_flyway.conn.commit()
         inserted = c.rowcount > 0
