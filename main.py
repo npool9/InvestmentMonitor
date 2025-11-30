@@ -1,6 +1,5 @@
 # gov_and_form4_app.py
-import sqlite3
-from idlelib.pyparse import trans
+from pg_flyway import PGFlyway
 
 from flask import Flask, jsonify, render_template_string
 from selenium import webdriver
@@ -19,7 +18,7 @@ import html
 import datetime
 
 app = Flask(__name__)
-DB_PATH = "govtrades.db"
+pg_flyway = PGFlyway()
 HEADERS = {"User-Agent": "GovTradeMonitor/1.0"}
 
 # ---- TRANSACTION CODES (for Form 4) ----
@@ -48,70 +47,16 @@ prev_url = None
 
 # ---------------------- Database Setup ----------------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
     # existing filings & trades (SEC Form 4)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS filings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        accession TEXT UNIQUE,
-        insider TEXT,
-        issuer TEXT,
-        filing_date DATE,
-        url TEXT
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        filing_id INTEGER,
-        transaction_date DATE,
-        security_title TEXT,
-        transaction_type TEXT,
-        amount INTEGER,
-        price REAL,
-        FOREIGN KEY(filing_id) REFERENCES filings(id),
-        UNIQUE(filing_id, transaction_date, security_title, transaction_type, amount, price)
-    )
-    """)
-
-    # new: government officials and trades
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS gov_officials (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        role TEXT,
-        source_url TEXT,
-        UNIQUE(name, role)
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS gov_trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        official_id INTEGER,
-        transaction_date DATE,
-        security_title TEXT,
-        transaction_type TEXT,
-        amount INTEGER,
-        price REAL,
-        source_url TEXT,
-        FOREIGN KEY(official_id) REFERENCES gov_officials(id),
-        UNIQUE(official_id, transaction_date, security_title, transaction_type, amount)
-    )
-    """)
-
-    # tracked items (used by both dashboards)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS tracked_insiders (
-        insider TEXT PRIMARY KEY
-    )
-    """)
-
-    conn.commit()
-    conn.close()
+    global pg_flyway
+    pg_flyway.create_database("publictrades")
+    pg_flyway = PGFlyway("publictrades")
+    pg_flyway.create_table("filings")
+    pg_flyway.create_table("trades")
+    pg_flyway.create_table("gov_officials")
+    pg_flyway.create_table("gov_trades")
+    pg_flyway.create_table("tracked_insiders")
+    pg_flyway.conn.commit()
 
 init_db()
 
@@ -283,38 +228,35 @@ def parse_form4(accession, index_url, url, parser_type):
 
 # ---------------------- Helper DB insert functions ----------------------
 def insert_filing(accession, insider, issuer, filing_date, url):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     c.execute("""
-        INSERT OR IGNORE INTO filings (accession, insider, issuer, filing_date, url)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO filings (accession, insider, issuer, filing_date, url)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (accession) DO NOTHING
     """, (accession, insider, issuer, filing_date, url))
-    conn.commit()
-    c.execute("SELECT id FROM filings WHERE accession=?", (accession,))
+    pg_flyway.conn.commit()
+    c.execute("SELECT id FROM filings WHERE accession=%s", (accession,))
     row = c.fetchone()
-    conn.close()
     if not row:
         raise RuntimeError(f"Could not get filing id for accession {accession}")
     return row[0]
 
 def insert_trade(filing_id, date, title, ttype, amount, price):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     amount_val = normalize_number(amount, integer=True)
     price_val = normalize_number(price, integer=False)
     try:
         c.execute("""
-            INSERT OR IGNORE INTO trades
+            INSERT INTO trades
             (filing_id, transaction_date, security_title, transaction_type, amount, price)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (filing_id, transaction_date, security_title, transaction_type, amount, price) DO NOTHING
         """, (filing_id, date, title, ttype, amount_val, price_val))
-        conn.commit()
+        pg_flyway.conn.commit()
         inserted = c.rowcount > 0
-        conn.close()
         return inserted
     except Exception as e:
         print("[ERROR] Trade insert failed:", e)
-        conn.close()
         return False
 
 # ---------------------- Minimal Form4 parsing (kept concise) ----------------------
@@ -346,49 +288,41 @@ def find_primary_document(index_url, file_type):
 
 # ---------------------- Government scraping helpers ----------------------
 def insert_gov_official(name, role, source_url):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO gov_officials (name, role, source_url) VALUES (?, ?, ?)",
+    c = pg_flyway.conn.cursor()
+    c.execute("INSERT INTO gov_officials (name, role, source_url) VALUES (%s, %s, %s) ON CONFLICT (name, role, source_url) DO NOTHING",
               (name, role, source_url))
-    conn.commit()
-    c.execute("SELECT id FROM gov_officials WHERE name=? AND role=? AND source_url=?", (name, role, source_url))
+    pg_flyway.conn.commit()
+    c.execute("SELECT id FROM gov_officials WHERE name=%s AND role=%s AND source_url=%s", (name, role, source_url))
     row = c.fetchone()
-    conn.close()
     return row[0] if row else None
 
 def delete_gov_officials():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     c.execute("DELETE FROM gov_officials")
-    conn.commit()
-    conn.close()
+    pg_flyway.conn.commit()
 
 def insert_gov_trade(official_id, date, title, ttype, amount, price, source_url):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     amount_val = normalize_number(amount, integer=True)
     price_val = normalize_number(price, integer=False)
     try:
         c.execute("""
-            INSERT OR IGNORE INTO gov_trades
+            INSERT INTO gov_trades
             (official_id, transaction_date, security_title, transaction_type, amount, price, source_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (official_id, transaction_date, security_title, transaction_type, amount, price, source_url) DO NOTHING
         """, (official_id, date, title, ttype, amount_val, price_val, source_url))
-        conn.commit()
+        pg_flyway.conn.commit()
         inserted = c.rowcount > 0
-        conn.close()
         return inserted
     except Exception as e:
         print("[ERROR] Gov trade insert failed:", e)
-        conn.close()
         return False
 
 def delete_gov_trades():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     c.execute("DELETE FROM gov_trades")
-    conn.commit()
-    conn.close()
+    pg_flyway.conn.commit()
 
 # --- Example: scrape House PTR listings ---
 def scrape_house_ptrs(limit=10):
@@ -645,20 +579,17 @@ def pull_gov_once():
 # ---------------------- Tracked endpoints (shared) ----------------------
 @app.route("/track/<insider>", methods=["POST"])
 def track_insider(insider):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO tracked_insiders (insider) VALUES (?)", (insider,))
-    conn.commit()
-    conn.close()
+    c = pg_flyway.conn.cursor()
+    c.execute("INSERT INTO tracked_insiders (insider) VALUES (%s) ON CONFLICT (insider) DO NOTHING", (insider,))
+    pg_flyway.conn.commit()
+    pg_flyway.conn.close()
     return jsonify({"status": "tracked", "insider": insider})
 
 @app.route("/untrack/<insider>", methods=["POST"])
 def untrack_insider(insider):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM tracked_insiders WHERE insider=?", (insider,))
-    conn.commit()
-    conn.close()
+    c = pg_flyway.conn.cursor()
+    c.execute("DELETE FROM tracked_insiders WHERE insider=%s", (insider,))
+    pg_flyway.conn.commit()
     return jsonify({"status": "untracked", "insider": insider})
 
 # ---------------------- Dashboards ----------------------
@@ -666,8 +597,7 @@ def untrack_insider(insider):
 @app.route("/sec_dashboard")
 def dashboard():
     """Original Form 4 dashboard (shows trades from 'trades' table)."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     c.execute("""
         SELECT filings.insider, filings.issuer, trades.transaction_date,
                trades.security_title, trades.transaction_type,
@@ -680,7 +610,6 @@ def dashboard():
         LIMIT 1000
     """)
     rows = c.fetchall()
-    conn.close()
 
     html = """
     <h1>SEC Form 4 — Government Insider Trades</h1>
@@ -741,8 +670,7 @@ def gov_dashboard():
     Government officials dashboard (shows gov_trades joined with gov_officials).
     Tracked insiders from tracked_insiders table will float to the top and be highlighted.
     """
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
     c.execute("""
         SELECT go.name, go.role, gt.transaction_date, gt.security_title,
                gt.transaction_type, gt.amount, gt.price, gt.source_url,
@@ -754,7 +682,6 @@ def gov_dashboard():
         LIMIT 1000
     """)
     rows = c.fetchall()
-    conn.close()
 
     html = """
     <h1>Periodic Trade Reports — Government Disclosures</h1>
@@ -813,8 +740,7 @@ def gov_dashboard():
 
 @app.route("/dashboard_tracked")
 def dashboard_tracked():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    c = pg_flyway.conn.cursor()
 
     # --- SEC tracked insiders ---
     c.execute("""
@@ -839,8 +765,6 @@ def dashboard_tracked():
     """)
 
     gov_rows = c.fetchall()
-
-    conn.close()
 
     # merge and sort by date desc
     rows = sec_rows + gov_rows
